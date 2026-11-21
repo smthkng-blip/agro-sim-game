@@ -221,7 +221,7 @@ export const NpcsView: React.FC<Props> = ({
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="row-between" style={{ marginBottom: 12 }}>
               <div className="row-gap">
-                <NpcPortrait npcId={activeNpc.id} size={64} />
+                <NpcPortrait npcId={activeNpc.id} size={74} animated />
                 <div>
                   <h3 style={{ margin: 0 }}>{activeNpc.name}</h3>
                   <div className="muted">{activeNpc.role}</div>

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Sprout,
   Sun,
+  Moon,
   Droplets,
   FastForward,
   RotateCcw,
@@ -14,6 +15,8 @@ import {
   Warehouse,
   Sparkles,
   Layers,
+  Volume2,
+  VolumeX,
   X,
 } from 'lucide-react';
 import type {
@@ -72,7 +75,9 @@ import { CLIMATE_SPECS, SEASON_LABELS, WEATHER_SPECS } from './sim/weather';
 import { SOIL_ACTION_COSTS, SOIL_ACTION_LABELS } from './sim/soil';
 import { formatMoney, getBarnUsedUnits } from './sim/market';
 import { getForecastDaysLimit } from './sim/homestead';
-import { FarmSceneCanvas } from './components/FarmSceneCanvas';
+import { sfx } from './audio/sfx';
+import { FarmSceneCanvas, type SceneEffectBurst } from './components/FarmSceneCanvas';
+import { CropIcon } from './components/CropIcon';
 import { LivestockView } from './components/LivestockView';
 import { FarmhouseView } from './components/FarmhouseView';
 import { NpcsView } from './components/NpcsView';
@@ -99,11 +104,23 @@ const HEATMAP_MODES: Array<{ id: HeatmapMode; label: string }> = [
   { id: 'health', label: 'Plant Health' },
 ];
 
+const THEME_STORAGE_KEY = 'terracraft_theme_v1';
+
 export const App: React.FC = () => {
   const [state, setState] = useState<GameState>(() => {
     const saved = loadGameFromStorage();
     return saved ?? createInitialState('tropical_monsoon');
   });
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if (saved === 'dark' || saved === 'light') return saved;
+    } catch {
+      // ignore
+    }
+    return 'light';
+  });
+  const [muted, setMuted] = useState<boolean>(false);
   const [tab, setTab] = useState<GameTab>('farm');
   const [selectedPlotId, setSelectedPlotId] = useState<number>(0);
   const [selectedSeed, setSelectedSeed] = useState<CropId>('rubber_tree');
@@ -111,8 +128,23 @@ export const App: React.FC = () => {
   const [focusedNpcId, setFocusedNpcId] = useState<NpcId | null>(null);
   const [toast, setToast] = useState<string>('');
   const [popups, setPopups] = useState<FloatingPopup[]>([]);
-  const [splashPlotIds, setSplashPlotIds] = useState<number[]>([]);
+  const [effectBurst, setEffectBurst] = useState<SceneEffectBurst | null>(null);
   const [showResetModal, setShowResetModal] = useState<boolean>(false);
+
+  // Sync theme attribute on root document
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
+
+  // Sync mute state
+  useEffect(() => {
+    sfx.setMuted(muted);
+  }, [muted]);
 
   // Auto-save whenever state updates
   useEffect(() => {
@@ -136,6 +168,13 @@ export const App: React.FC = () => {
     ]);
   }, []);
 
+  const triggerBurst = useCallback(
+    (kind: SceneEffectBurst['kind'], plotIds?: number[], worldPos?: { x: number; y: number }) => {
+      setEffectBurst({ id: Date.now() + Math.random(), kind, plotIds, worldPos });
+    },
+    [],
+  );
+
   const applyResult = useCallback(
     (res: ActionResult, popupPos?: { x: number; y: number }) => {
       setState(res.state);
@@ -148,6 +187,7 @@ export const App: React.FC = () => {
   );
 
   const handleNextDay = useCallback(() => {
+    sfx.playNextDayChime();
     setState((prev) => {
       const next = advanceDay(prev);
       const rep = next.lastDailyReport;
@@ -158,7 +198,7 @@ export const App: React.FC = () => {
         if (rep.spoiledCount > 0) parts.push(`${rep.spoiledCount} spoiled`);
         setToast(parts.join(' · '));
         if (rep.manureProduced > 0) {
-          spawnPopup(`+${rep.manureProduced} Manure!`, '#a3e635', 0.86, 0.45);
+          spawnPopup(`+${rep.manureProduced} Manure!`, '#a3e635', 0.84, 0.48);
         }
       }
       return next;
@@ -172,7 +212,12 @@ export const App: React.FC = () => {
         e.code === 'Space' &&
         !showResetModal &&
         !focusedNpcId &&
-        !(e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLButtonElement)
+        !(
+          e.target instanceof HTMLInputElement ||
+          e.target instanceof HTMLSelectElement ||
+          e.target instanceof HTMLTextAreaElement ||
+          e.target instanceof HTMLButtonElement
+        )
       ) {
         e.preventDefault();
         handleNextDay();
@@ -190,23 +235,54 @@ export const App: React.FC = () => {
   const claimableQuests = state.quests.filter((q) => !q.claimed && q.completed).length;
   const barnUnits = getBarnUsedUnits(state.barn);
 
-  const triggerWaterSplash = (plotIds: number[]) => {
-    setSplashPlotIds(plotIds);
-    setTimeout(() => setSplashPlotIds([]), 750);
-  };
-
   const handleSoilAction = (action: SoilActionType) => {
     const res = performSoilAction(state, selectedPlot.id, action);
-    if (res.ok && action === 'irrigate') {
-      const ids = state.homestead.ownedTools.includes('drip_irrigation')
-        ? state.plots.filter((p) => p.row === selectedPlot.row).map((p) => p.id)
-        : [selectedPlot.id];
-      triggerWaterSplash(ids);
+    if (res.ok) {
+      if (action === 'irrigate') {
+        sfx.playWaterSplash();
+        const ids = state.homestead.ownedTools.includes('drip_irrigation')
+          ? state.plots.filter((p) => p.row === selectedPlot.row).map((p) => p.id)
+          : [selectedPlot.id];
+        triggerBurst('water', ids);
+      } else {
+        sfx.playPlantPop();
+        triggerBurst('dirt', [selectedPlot.id]);
+      }
     }
     applyResult(res, { x: 0.48, y: 0.5 });
   };
 
+  const handlePlantCrop = () => {
+    const res = plantCrop(state, selectedPlot.id, selectedSeed);
+    if (res.ok) {
+      sfx.playPlantPop();
+      triggerBurst('dirt', [selectedPlot.id]);
+    }
+    applyResult(res, { x: 0.48, y: 0.5 });
+  };
+
+  const handleHarvestPlot = (sellImmediately: boolean) => {
+    const res = harvestPlot(state, selectedPlot.id, sellImmediately);
+    if (res.ok) {
+      if (sellImmediately) sfx.playCoinClink();
+      else sfx.playHarvestChime();
+      triggerBurst(sellImmediately ? 'harvest_coins' : 'harvest', [selectedPlot.id]);
+    }
+    applyResult(res, { x: 0.5, y: 0.4 });
+  };
+
+  const handleHarvestAll = () => {
+    const readyIds = state.plots.filter((p) => p.crop && p.crop.stage === 4).map((p) => p.id);
+    const res = harvestAllReady(state, false);
+    if (res.ok) {
+      sfx.playHarvestChime();
+      triggerBurst('harvest', readyIds);
+    }
+    applyResult(res, { x: 0.5, y: 0.35 });
+  };
+
   const handleResetFarm = (climate: ClimateType) => {
+    sfx.playClick();
     clearSavedGame();
     const fresh = createInitialState(climate);
     setState(fresh);
@@ -244,7 +320,10 @@ export const App: React.FC = () => {
           </span>
 
           <button
-            onClick={() => setState((prev) => toggleCurrencyAction(prev))}
+            onClick={() => {
+              sfx.playClick();
+              setState((prev) => toggleCurrencyAction(prev));
+            }}
             title="Toggle between $ USD and ฿ THB (1 USD = 35 THB)"
           >
             {state.currency === 'USD' ? '$ USD → ฿ THB' : '฿ THB → $ USD'}
@@ -258,17 +337,46 @@ export const App: React.FC = () => {
             🌾 Feed: <strong>{state.animalFeed}</strong>
           </span>
 
+          <button
+            onClick={() => {
+              sfx.playClick();
+              setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
+            }}
+            title="Switch between Cozy Sunlit Light and Botanical Dark themes"
+            aria-label="Toggle Theme"
+          >
+            {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
+            {theme === 'light' ? 'Dark' : 'Sunlit'}
+          </button>
+
+          <button
+            onClick={() => setMuted((prev) => !prev)}
+            title={muted ? 'Unmute Sound Effects' : 'Mute Sound Effects'}
+            aria-label="Toggle Sound"
+          >
+            {muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+          </button>
+
           <button className="primary" onClick={handleNextDay} title="Advance to next day (Spacebar)">
             <FastForward size={15} /> Next Day (D{state.day + 1})
           </button>
 
-          <button onClick={() => setShowResetModal(true)} title="Reset Farm & Choose Climate">
+          <button
+            onClick={() => {
+              sfx.playClick();
+              setShowResetModal(true);
+            }}
+            title="Reset Farm & Choose Climate"
+          >
             <RotateCcw size={14} /> New Farm
           </button>
         </div>
 
         {/* Forecast Strip (3d default, 5d with Barometer) */}
-        <div className="forecast-strip" style={{ width: '100%', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div
+          className="forecast-strip"
+          style={{ width: '100%', paddingTop: 6, borderTop: '1px solid var(--border)' }}
+        >
           <span className="muted" style={{ fontSize: '0.73rem' }}>
             <Sun size={12} style={{ verticalAlign: 'middle' }} /> {forecastLimit}-Day Forecast:
           </span>
@@ -291,7 +399,12 @@ export const App: React.FC = () => {
       {toast && (
         <div className="toast-banner">
           <span>{toast}</span>
-          <button className="ghost" style={{ padding: '2px 6px' }} onClick={() => setToast('')} aria-label="Dismiss message">
+          <button
+            className="ghost"
+            style={{ padding: '2px 6px' }}
+            onClick={() => setToast('')}
+            aria-label="Dismiss message"
+          >
             <X size={14} />
           </button>
         </div>
@@ -299,29 +412,71 @@ export const App: React.FC = () => {
 
       {/* Navigation Tabs */}
       <nav className="nav-tabs" aria-label="Game Sections">
-        <button className={`nav-tab ${tab === 'farm' ? 'active' : ''}`} onClick={() => setTab('farm')}>
+        <button
+          className={`nav-tab ${tab === 'farm' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('farm');
+          }}
+        >
           <Sprout size={15} /> Farm Land
           {readyHarvestCount > 0 && <span className="badge-count">{readyHarvestCount}</span>}
         </button>
-        <button className={`nav-tab ${tab === 'livestock' ? 'active' : ''}`} onClick={() => setTab('livestock')}>
+        <button
+          className={`nav-tab ${tab === 'livestock' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('livestock');
+          }}
+        >
           🐄 Livestock Pasture
           {readyLivestockCount > 0 && <span className="badge-count">{readyLivestockCount}</span>}
         </button>
-        <button className={`nav-tab ${tab === 'farmhouse' ? 'active' : ''}`} onClick={() => setTab('farmhouse')}>
+        <button
+          className={`nav-tab ${tab === 'farmhouse' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('farmhouse');
+          }}
+        >
           <Home size={15} /> Farmhouse Interior
         </button>
-        <button className={`nav-tab ${tab === 'npcs' ? 'active' : ''}`} onClick={() => setTab('npcs')}>
+        <button
+          className={`nav-tab ${tab === 'npcs' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('npcs');
+          }}
+        >
           <Users size={15} /> Village & NPCs
           {claimableQuests > 0 && <span className="badge-count">{claimableQuests}</span>}
         </button>
-        <button className={`nav-tab ${tab === 'market' ? 'active' : ''}`} onClick={() => setTab('market')}>
+        <button
+          className={`nav-tab ${tab === 'market' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('market');
+          }}
+        >
           <Warehouse size={15} /> Market & Barn
           {barnUnits > 0 && <span className="badge-count">{barnUnits}</span>}
         </button>
-        <button className={`nav-tab ${tab === 'shop' ? 'active' : ''}`} onClick={() => setTab('shop')}>
+        <button
+          className={`nav-tab ${tab === 'shop' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('shop');
+          }}
+        >
           <ShoppingCart size={15} /> Shop
         </button>
-        <button className={`nav-tab ${tab === 'almanac' ? 'active' : ''}`} onClick={() => setTab('almanac')}>
+        <button
+          className={`nav-tab ${tab === 'almanac' ? 'active' : ''}`}
+          onClick={() => {
+            sfx.playClick();
+            setTab('almanac');
+          }}
+        >
           <BookOpen size={15} /> Agronomy Almanac
         </button>
       </nav>
@@ -329,18 +484,20 @@ export const App: React.FC = () => {
       {/* Active Tab Content */}
       {tab === 'farm' && (
         <div className="farm-layout">
-          {/* Left: Living Farm Canvas + Heatmap Bar */}
+          {/* Left: Seamless 2.5D Isometric Living World + Heatmap Bar */}
           <div className="card">
             <div className="card-header">
-              <h2 className="card-title">
-                🌿 Living Farm Estate ({state.homestead.gridCols}×{state.homestead.gridRows} Plots)
-              </h2>
+              <div>
+                <h2 className="card-title">
+                  🌿 2.5D Isometric Farm Estate ({state.homestead.gridCols}×{state.homestead.gridRows} Plots)
+                </h2>
+                <span className="muted" style={{ fontSize: '0.72rem' }}>
+                  Scroll to zoom · Drag to pan · Click plots, farmhouse, pasture, or visiting NPCs
+                </span>
+              </div>
               <div className="row-gap">
                 {readyHarvestCount > 0 && (
-                  <button
-                    className="gold"
-                    onClick={() => applyResult(harvestAllReady(state, false), { x: 0.5, y: 0.35 })}
-                  >
+                  <button className="gold" onClick={handleHarvestAll}>
                     <Sparkles size={14} /> Harvest All Ready ({readyHarvestCount})
                   </button>
                 )}
@@ -352,16 +509,27 @@ export const App: React.FC = () => {
               selectedPlotId={selectedPlot.id}
               heatmap={heatmap}
               popups={popups}
-              splashPlotIds={splashPlotIds}
-              onSelectPlot={(id) => setSelectedPlotId(id)}
+              effectBurst={effectBurst}
+              onSelectPlot={(id) => {
+                sfx.playClick();
+                setSelectedPlotId(id);
+              }}
               onClickNpc={(npcId) => {
+                sfx.playHeartChime();
                 applyResult(chatNpcAction(state, npcId));
                 setFocusedNpcId(npcId);
                 setTab('npcs');
               }}
-              onClickPasture={() => setTab('livestock')}
-              onClickFarmhouse={() => setTab('farmhouse')}
+              onClickPasture={() => {
+                sfx.playClick();
+                setTab('livestock');
+              }}
+              onClickFarmhouse={() => {
+                sfx.playClick();
+                setTab('farmhouse');
+              }}
               onClickLockedLand={() => {
+                sfx.playClick();
                 setTab('shop');
                 setToast('Buy a Land Expansion Deed in the Shop to unlock surrounding parcels!');
               }}
@@ -377,7 +545,10 @@ export const App: React.FC = () => {
                   key={m.id}
                   className={heatmap === m.id ? 'active' : ''}
                   style={{ padding: '4px 9px', fontSize: '0.76rem' }}
-                  onClick={() => setHeatmap(m.id)}
+                  onClick={() => {
+                    sfx.playClick();
+                    setHeatmap(m.id);
+                  }}
                 >
                   {m.label}
                 </button>
@@ -389,7 +560,10 @@ export const App: React.FC = () => {
               <div className="muted" style={{ fontSize: '0.73rem', marginBottom: 4 }}>Recent Farm Activity</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 72, overflowY: 'auto' }}>
                 {state.log.slice(0, 5).map((entry, i) => (
-                  <div key={i} style={{ fontSize: '0.75rem', color: i === 0 ? 'var(--text-main)' : 'var(--text-muted)' }}>
+                  <div
+                    key={i}
+                    style={{ fontSize: '0.75rem', color: i === 0 ? 'var(--text-main)' : 'var(--text-muted)' }}
+                  >
                     • {entry}
                   </div>
                 ))}
@@ -418,7 +592,10 @@ export const App: React.FC = () => {
               {selectedPlot.crop ? (
                 <div className="sub-card" style={{ marginBottom: 10 }}>
                   <div className="row-between">
-                    <strong>{CROP_CATALOG[selectedPlot.crop.cropId].name}</strong>
+                    <div className="row-gap">
+                      <CropIcon cropId={selectedPlot.crop.cropId} size={24} />
+                      <strong>{CROP_CATALOG[selectedPlot.crop.cropId].name}</strong>
+                    </div>
                     <span className={`tag ${selectedPlot.crop.stage === 4 ? 'gold' : 'green'}`}>
                       {GROWTH_STAGE_NAMES[selectedPlot.crop.stage]} ({Math.round(selectedPlot.crop.progress)}%)
                     </span>
@@ -445,14 +622,14 @@ export const App: React.FC = () => {
                       <button
                         className="gold"
                         style={{ flex: 1 }}
-                        onClick={() => applyResult(harvestPlot(state, selectedPlot.id, false), { x: 0.5, y: 0.4 })}
+                        onClick={() => handleHarvestPlot(false)}
                       >
                         Harvest to Barn
                       </button>
                       <button
                         className="primary"
                         style={{ flex: 1 }}
-                        onClick={() => applyResult(harvestPlot(state, selectedPlot.id, true), { x: 0.5, y: 0.4 })}
+                        onClick={() => handleHarvestPlot(true)}
                       >
                         Harvest & Sell
                       </button>
@@ -461,7 +638,7 @@ export const App: React.FC = () => {
                 </div>
               ) : (
                 <div className="muted" style={{ marginBottom: 8 }}>
-                  Empty tilled plot — choose a seed below to plant!
+                  Empty tilled soil bed — pick a seed below to plant!
                 </div>
               )}
 
@@ -554,7 +731,7 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            {/* 12-Plant Seed Selector */}
+            {/* 12-Plant Seed Selector with Illustrated SVG Icons */}
             <div className="card">
               <div className="card-header">
                 <h3 className="card-title">🌱 Plant Seeds & Saplings (12 Species)</h3>
@@ -568,10 +745,16 @@ export const App: React.FC = () => {
                     <button
                       key={cropId}
                       className={`seed-btn ${active ? 'selected' : ''}`}
-                      onClick={() => setSelectedSeed(cropId)}
+                      onClick={() => {
+                        sfx.playClick();
+                        setSelectedSeed(cropId);
+                      }}
                     >
                       <div className="seed-top">
-                        <strong style={{ color: spec.accentColor }}>{spec.name}</strong>
+                        <span className="row-gap" style={{ gap: 5 }}>
+                          <CropIcon cropId={cropId} size={18} />
+                          <strong style={{ color: spec.accentColor }}>{spec.name}</strong>
+                        </span>
                         <span>{formatMoney(price, state.currency)}</span>
                       </div>
                       <div className="seed-meta">
@@ -586,7 +769,7 @@ export const App: React.FC = () => {
                 className="primary"
                 style={{ width: '100%', marginTop: 10 }}
                 disabled={Boolean(selectedPlot.crop)}
-                onClick={() => applyResult(plantCrop(state, selectedPlot.id, selectedSeed), { x: 0.48, y: 0.5 })}
+                onClick={handlePlantCrop}
               >
                 <Sprout size={15} /> Plant {CROP_CATALOG[selectedSeed].name} on R{selectedPlot.row + 1}C{selectedPlot.col + 1} (
                 {formatMoney(getSeedPrice(state, selectedSeed), state.currency)})
@@ -599,24 +782,76 @@ export const App: React.FC = () => {
       {tab === 'livestock' && (
         <LivestockView
           state={state}
-          onBuyAnimal={(type: AnimalType, asMature: boolean) => applyResult(buyAnimal(state, type, asMature))}
-          onFeedAnimal={(id: string, cropId?: CropId) => applyResult(feedAnimalAction(state, id, cropId))}
-          onFeedAll={() => applyResult(feedAllAnimalsAction(state))}
-          onPetAnimal={(id: string) => applyResult(petAnimalAction(state, id))}
-          onCollectProduct={(id: string) => applyResult(collectAnimalProductAction(state, id))}
-          onCollectAll={() => applyResult(collectAllAnimalProductsAction(state))}
-          onSellAnimal={(id: string) => applyResult(sellAnimalAction(state, id))}
+          onBuyAnimal={(type: AnimalType, asMature: boolean) => {
+            const res = buyAnimal(state, type, asMature);
+            if (res.ok) sfx.playAnimalSound(type);
+            applyResult(res);
+          }}
+          onFeedAnimal={(id: string, cropId?: CropId) => {
+            const animal = state.animals.find((a) => a.id === id);
+            const res = feedAnimalAction(state, id, cropId);
+            if (res.ok && animal) sfx.playAnimalSound(animal.type);
+            applyResult(res);
+          }}
+          onFeedAll={() => {
+            const res = feedAllAnimalsAction(state);
+            if (res.ok) sfx.playPlantPop();
+            applyResult(res);
+          }}
+          onPetAnimal={(id: string) => {
+            const res = petAnimalAction(state, id);
+            if (res.ok) {
+              sfx.playHeartChime();
+              triggerBurst('heart', undefined, { x: 870, y: 340 });
+            }
+            applyResult(res);
+          }}
+          onCollectProduct={(id: string) => {
+            const res = collectAnimalProductAction(state, id);
+            if (res.ok) sfx.playHarvestChime();
+            applyResult(res);
+          }}
+          onCollectAll={() => {
+            const res = collectAllAnimalProductsAction(state);
+            if (res.ok) sfx.playHarvestChime();
+            applyResult(res);
+          }}
+          onSellAnimal={(id: string) => {
+            const res = sellAnimalAction(state, id);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
         />
       )}
 
       {tab === 'farmhouse' && (
         <FarmhouseView
           state={state}
-          onUpgradeFarmhouse={() => applyResult(upgradeFarmhouseAction(state))}
-          onBuyFurniture={(id: FurnitureId) => applyResult(buyFurnitureAction(state, id))}
-          onPlaceFurniture={(id: FurnitureId, slot: number) => applyResult(placeFurnitureAction(state, id, slot))}
-          onRemoveFurniture={(instanceId: string) => applyResult(removeFurnitureAction(state, instanceId))}
-          onMoveFurniture={(instanceId: string, slot: number) => applyResult(moveFurnitureAction(state, instanceId, slot))}
+          onUpgradeFarmhouse={() => {
+            const res = upgradeFarmhouseAction(state);
+            if (res.ok) sfx.playHarvestChime();
+            applyResult(res);
+          }}
+          onBuyFurniture={(id: FurnitureId) => {
+            const res = buyFurnitureAction(state, id);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onPlaceFurniture={(id: FurnitureId, slot: number) => {
+            const res = placeFurnitureAction(state, id, slot);
+            if (res.ok) sfx.playPlantPop();
+            applyResult(res);
+          }}
+          onRemoveFurniture={(instanceId: string) => {
+            const res = removeFurnitureAction(state, instanceId);
+            if (res.ok) sfx.playClick();
+            applyResult(res);
+          }}
+          onMoveFurniture={(instanceId: string, slot: number) => {
+            const res = moveFurnitureAction(state, instanceId, slot);
+            if (res.ok) sfx.playClick();
+            applyResult(res);
+          }}
         />
       )}
 
@@ -625,30 +860,79 @@ export const App: React.FC = () => {
           state={state}
           focusedNpcId={focusedNpcId}
           onFocusNpc={setFocusedNpcId}
-          onChatNpc={(id) => applyResult(chatNpcAction(state, id))}
-          onGiftNpc={(id, itemId) => applyResult(giftNpcAction(state, id, itemId))}
-          onClaimQuest={(qid) => applyResult(claimQuestAction(state, qid))}
-          onAcceptContract={(cid) => applyResult(acceptContractAction(state, cid))}
-          onDeliverContract={(cid) => applyResult(deliverContractAction(state, cid))}
-          onEnterFestival={(itemId) => applyResult(enterHarvestFestivalAction(state, itemId))}
+          onChatNpc={(id) => {
+            sfx.playClick();
+            applyResult(chatNpcAction(state, id));
+          }}
+          onGiftNpc={(id, itemId) => {
+            const res = giftNpcAction(state, id, itemId);
+            if (res.ok) {
+              sfx.playHeartChime();
+              triggerBurst('heart', undefined, { x: 165, y: 440 });
+            }
+            applyResult(res);
+          }}
+          onClaimQuest={(qid) => {
+            const res = claimQuestAction(state, qid);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onAcceptContract={(cid) => {
+            sfx.playClick();
+            applyResult(acceptContractAction(state, cid));
+          }}
+          onDeliverContract={(cid) => {
+            const res = deliverContractAction(state, cid);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onEnterFestival={(itemId) => {
+            const res = enterHarvestFestivalAction(state, itemId);
+            if (res.ok) sfx.playHarvestChime();
+            applyResult(res);
+          }}
         />
       )}
 
       {tab === 'market' && (
         <MarketView
           state={state}
-          onSellBarnItem={(id, qty) => applyResult(sellBarnItemAction(state, id, qty))}
-          onTakeLoan={(amt) => applyResult(takeLoanAction(state, amt))}
-          onRepayLoan={(amt) => applyResult(repayLoanAction(state, amt))}
+          onSellBarnItem={(id, qty) => {
+            const res = sellBarnItemAction(state, id, qty);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onTakeLoan={(amt) => {
+            const res = takeLoanAction(state, amt);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onRepayLoan={(amt) => {
+            const res = repayLoanAction(state, amt);
+            if (res.ok) sfx.playClick();
+            applyResult(res);
+          }}
         />
       )}
 
       {tab === 'shop' && (
         <ShopView
           state={state}
-          onExpandLand={() => applyResult(buyLandExpansionAction(state))}
-          onBuyTool={(tid: ToolId) => applyResult(buyToolAction(state, tid))}
-          onBuySupplies={(s, q) => applyResult(buySuppliesAction(state, s, q))}
+          onExpandLand={() => {
+            const res = buyLandExpansionAction(state);
+            if (res.ok) sfx.playHarvestChime();
+            applyResult(res);
+          }}
+          onBuyTool={(tid: ToolId) => {
+            const res = buyToolAction(state, tid);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
+          onBuySupplies={(s, q) => {
+            const res = buySuppliesAction(state, s, q);
+            if (res.ok) sfx.playCoinClink();
+            applyResult(res);
+          }}
         />
       )}
 

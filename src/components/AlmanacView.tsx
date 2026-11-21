@@ -4,6 +4,7 @@ import type { GameState } from '../sim/types';
 import { ALL_CROP_IDS, CROP_CATALOG } from '../sim/crops';
 import { ALL_WEATHER_TYPES, WEATHER_SPECS } from '../sim/weather';
 import { formatMoney } from '../sim/market';
+import { CropIcon } from './CropIcon';
 
 interface Props {
   state: GameState;
@@ -44,10 +45,13 @@ export const AlmanacView: React.FC<Props> = ({ state }) => {
             return (
               <div key={id} className="sub-card">
                 <div className="row-between">
-                  <div>
-                    <strong style={{ color: c.accentColor }}>{c.name}</strong>
-                    <div className="muted" style={{ fontSize: '0.72rem', fontStyle: 'italic' }}>
-                      {c.scientificName}
+                  <div className="row-gap">
+                    <CropIcon cropId={id} size={28} />
+                    <div>
+                      <strong style={{ color: c.accentColor }}>{c.name}</strong>
+                      <div className="muted" style={{ fontSize: '0.72rem', fontStyle: 'italic' }}>
+                        {c.scientificName}
+                      </div>
                     </div>
                   </div>
                   <span className={`tag ${c.isPerennial ? 'gold' : 'green'}`}>
